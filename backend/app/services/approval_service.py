@@ -23,8 +23,11 @@ def approve_route_change(approval_id: str, reason: str | None, db: Session):
         route.status = "REPLANNED_APPROVED"
         route.version += 1
 
-        # Delete old stops for this route
-        db.query(StopModel).filter(StopModel.route_id == approval.route_id).delete()
+        # Delete old stops for this route and flush to release primary keys from identity map
+        old_stops = db.query(StopModel).filter(StopModel.route_id == approval.route_id).all()
+        for s in old_stops:
+            db.delete(s)
+        db.flush()
 
         # Insert new approved stops sequence
         if approval.proposed_stops:
