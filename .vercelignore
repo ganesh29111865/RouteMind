@@ -1,0 +1,8 @@
+backend/
+tests/
+*.py
+*.db
+__pycache__/
+*.pyc
+.venv/
+venv/
