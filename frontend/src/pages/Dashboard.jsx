@@ -58,7 +58,9 @@ export default function Dashboard() {
     ? [...routes].sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
     : null
 
-  const activeStops = activeRoute ? activeRoute.stops : defaultStops
+  const activeStops = activeRoute 
+    ? [...activeRoute.stops].sort((a, b) => a.stop_sequence - b.stop_sequence) 
+    : defaultStops
   const distanceValue = activeRoute ? activeRoute.total_distance_km.toString() : "28.4"
   const totalStopsCount = activeRoute ? activeRoute.total_stops_count : 5
 

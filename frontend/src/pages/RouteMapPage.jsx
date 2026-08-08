@@ -37,7 +37,9 @@ export default function RouteMapPage() {
     setSelectedStop(null)
   }
 
-  const activeStops = selectedRoute?.stops || []
+  const activeStops = selectedRoute?.stops 
+    ? [...selectedRoute.stops].sort((a, b) => a.stop_sequence - b.stop_sequence) 
+    : []
 
   return (
     <div className="p-8 space-y-6">

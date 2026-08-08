@@ -33,7 +33,9 @@ export default function RouteDetailsPage() {
     setSelectedRoute(found)
   }
 
-  const activeStops = selectedRoute?.stops || []
+  const activeStops = selectedRoute?.stops 
+    ? [...selectedRoute.stops].sort((a, b) => a.stop_sequence - b.stop_sequence) 
+    : []
   const totalCod = activeStops.reduce((sum, s) => sum + (s.cod_amount_inr || 0), 0)
 
   return (
