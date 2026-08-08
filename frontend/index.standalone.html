@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RouteMind – Adaptive Route Optimization Dashboard</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 500: '#0284c7', 600: '#0265d2' },
+            dark: { 900: '#0b0f19', 800: '#111827', 700: '#1f2937' }
+          }
+        }
+      }
+    }
+  </script>
+  <!-- React & Babel CDNs -->
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- Leaflet CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    body { background-color: #0b0f19; color: #f8fafc; font-family: system-ui, -apple-system, sans-serif; }
+    .glass-panel { background: rgba(17, 24, 39, 0.85); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
+    .glass-card { background: rgba(31, 41, 55, 0.6); backdrop-filter: blur(8px); border: 1px solid rgba(255, 255, 255, 0.05); }
+    #map-container { height: 480px; width: 100%; border-radius: 1rem; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const API_BASE = 'http://localhost:8000/api/v1';
+
+    function App() {
+      const [page, setPage] = React.useState('dashboard');
+      const [routes, setRoutes] = React.useState([]);
+      const [metrics, setMetrics] = React.useState(null);
+      const [replanResult, setReplanResult] = React.useState(null);
+      const [loading, setLoading] = React.useState(false);
+      const [eventType, setEventType] = React.useState('TRAFFIC_AT_STOP');
+      const [delayMins, setDelayMins] = React.useState(30);
+      const [targetStopId, setTargetStopId] = React.useState('');
+      const [completedStops, setCompletedStops] = React.useState([]);
+      const [approvals, setApprovals] = React.useState([]);
+      const [approvalReason, setApprovalReason] = React.useState('');
+      const [approvalStatusStr, setApprovalStatusStr] = React.useState(null);
+
+      const loadApprovals = async () => {
+        try {
+          const r = await fetch(`${API_BASE}/approvals/pending`);
+          const data = await r.json();
+          setApprovals(data);
+        } catch(e) {}
+      };
+
+      React.useEffect(() => {
+        loadApprovals();
+      }, [page]);
+
+      const defaultStops = [
+        { name: "Amazon Hub Indiranagar", lat: 12.9716, lng: 77.6412, pkg: "DEPOT", eta: "08:00 AM", cod: 0 },
+        { name: "Koramangala 4th Block", lat: 12.9352, lng: 77.6245, pkg: "AMZ-101", eta: "09:15 AM", cod: 2500 },
+        { name: "HSR Layout Sector 1", lat: 12.9121, lng: 77.6445, pkg: "AMZ-102", eta: "09:45 AM", cod: 1200 },
+        { name: "Bellandur EcoSpace", lat: 12.9279, lng: 77.6811, pkg: "AMZ-103", eta: "10:30 AM", cod: 5000 },
+        { name: "Whitefield ITPB", lat: 12.9863, lng: 77.7381, pkg: "AMZ-104", eta: "11:15 AM", cod: 850 },
+      ];
+
+      React.useEffect(() => {
+        fetch(`${API_BASE}/metrics`).then(r => r.json()).then(data => setMetrics(data)).catch(() => {});
+        fetch(`${API_BASE}/routes`).then(r => r.json()).then(data => setRoutes(data)).catch(() => {});
+      }, []);
+
+      React.useEffect(() => {
+        if (document.getElementById('map-container')) {
+          const map = L.map('map-container').setView([12.9716, 77.6412], 12);
+          L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: 'OpenStreetMap'
+          }).addTo(map);
+
+          const coords = defaultStops.map(s => [s.lat, s.lng]);
+          L.polyline(coords, { color: '#0284c7', weight: 4, opacity: 0.8, dashArray: '6, 6' }).addTo(map);
+
+          defaultStops.forEach((s, idx) => {
+            L.marker([s.lat, s.lng]).addTo(map)
+              .bindPopup(`<b>#${idx+1} ${s.name}</b><br/>ETA: ${s.eta}<br/>COD: ₹${s.cod}`);
+          });
+        }
+      }, [page]);
+
+      const triggerReplan = async () => {
+        setLoading(true);
+        const routeId = routes.length > 0 ? routes[0].id : 'rt_8f91a2';
+        const activeStops = routes.length > 0 ? routes[0].stops : defaultStops;
+        try {
+          const payload = {
+            route_id: routeId,
+            event_type: eventType,
+          };
+          if (eventType === 'TRAFFIC_DELAY') {
+            payload.traffic_delay_minutes = parseFloat(delayMins);
+          } else if (eventType === 'TRAFFIC_AT_STOP') {
+            payload.stop_id = targetStopId || (activeStops[1] ? activeStops[1].id : 'STP_101');
+            payload.traffic_delay_minutes = parseFloat(delayMins);
+          } else if (eventType === 'FAILED_DELIVERY' || eventType === 'SKIP_STOP') {
+            payload.stop_id = targetStopId || (activeStops[1] ? activeStops[1].id : 'STP_101');
+          } else if (eventType === 'NEW_PICKUP') {
+            payload.new_pickup_stop = {
+              location_name: "Indiranagar Post Office Pickup",
+              latitude: 12.9780,
+              longitude: 77.6440,
+              package_id: "AMZ-PICK-99",
+              package_weight_kg: 2.0,
+              cod_amount_inr: 0.0,
+              time_window_start: "10:00",
+              time_window_end: "14:00",
+              is_no_entry_zone: false
+            };
+          }
+
+          const res = await fetch(`${API_BASE}/replan`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+          const data = await res.json();
+          setReplanResult(data);
+          loadApprovals();
+        } catch (e) {
+          alert('Backend connection error: ' + e.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      return (
+        <div className="flex min-h-screen">
+          {/* Sidebar */}
+          <aside className="w-64 glass-panel border-r border-slate-800 p-6 flex flex-col justify-between">
+            <div className="space-y-6">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-sky-600 to-cyan-400 flex items-center justify-center font-bold text-white shadow-lg">
+                  RM
+                </div>
+                <div>
+                  <h1 className="font-bold text-lg leading-tight">RouteMind</h1>
+                  <span className="text-[10px] text-sky-400 font-mono tracking-widest uppercase">AI Supply Chain</span>
+                </div>
+              </div>
+
+              <nav className="space-y-2">
+                {[
+                  { id: 'dashboard', label: 'Dashboard Overview' },
+                  { id: 'map', label: 'Interactive Route Map' },
+                  { id: 'approval', label: 'Supervisor Approval' },
+                  { id: 'analytics', label: 'Benchmark Analytics' },
+                  { id: 'settings', label: 'Indian Constraints' },
+                ].map(item => (
+                  <button
+                    key={item.id}
+                    onClick={() => setPage(item.id)}
+                    className={`w-full text-left px-4 py-3 rounded-xl font-medium text-xs transition-all ${
+                      page === item.id 
+                        ? 'bg-sky-600/20 text-sky-400 border border-sky-500/30' 
+                        : 'text-slate-400 hover:bg-slate-800/50 hover:text-slate-200'
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </nav>
+            </div>
+
+            <div className="bg-slate-900/60 p-3.5 rounded-xl border border-slate-800 text-xs space-y-1">
+              <div className="flex justify-between text-slate-400">
+                <span>Engine</span>
+                <span className="text-emerald-400 font-mono font-bold">OR-Tools</span>
+              </div>
+              <div className="flex justify-between text-slate-400">
+                <span>API Status</span>
+                <span className="text-emerald-400 font-mono">http://localhost:8000</span>
+              </div>
+            </div>
+          </aside>
+
+          {/* Main Content */}
+          <div className="flex-1 flex flex-col min-w-0">
+            <header className="h-16 glass-panel border-b border-slate-800 px-8 flex items-center justify-between">
+              <div>
+                <h2 className="text-lg font-bold">RouteMind Adaptive Logistics Control</h2>
+                <p className="text-xs text-slate-400">Google OR-Tools VRPTW + Indian Logistics Constraints Engine</p>
+              </div>
+              <div className="flex items-center space-x-3 text-xs">
+                <span className="bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-3 py-1 rounded-full font-medium">
+                  ● FastAPI Backend Active
+                </span>
+              </div>
+            </header>
+
+            <main className="p-8 space-y-8 overflow-y-auto">
+              {/* Dashboard Page */}
+              {(page === 'dashboard' || page === 'map') && (
+                <div className="space-y-6">
+                  <div className="grid grid-cols-4 gap-6">
+                    <div className="glass-card p-5 rounded-2xl border border-slate-800">
+                      <span className="text-xs text-slate-400 uppercase font-medium">Active Routes</span>
+                      <p className="text-3xl font-extrabold text-white mt-2">4</p>
+                      <span className="text-xs text-emerald-400 mt-1 block">100% OR-Tools Solved</span>
+                    </div>
+                    <div className="glass-card p-5 rounded-2xl border border-slate-800">
+                      <span className="text-xs text-slate-400 uppercase font-medium">Avg Route Distance</span>
+                      <p className="text-3xl font-extrabold text-sky-400 mt-2">28.4 <span className="text-sm font-normal">km</span></p>
+                      <span className="text-xs text-sky-400 mt-1 block">-33.6% vs Naive Greedy</span>
+                    </div>
+                    <div className="glass-card p-5 rounded-2xl border border-slate-800">
+                      <span className="text-xs text-slate-400 uppercase font-medium">Total COD Cash</span>
+                      <p className="text-3xl font-extrabold text-emerald-400 mt-2">₹9,550</p>
+                      <span className="text-xs text-emerald-400 mt-1 block">Under ₹50k Cap</span>
+                    </div>
+                    <div className="glass-card p-5 rounded-2xl border border-slate-800">
+                      <span className="text-xs text-slate-400 uppercase font-medium">Constraint Status</span>
+                      <p className="text-3xl font-extrabold text-purple-400 mt-2">100%</p>
+                      <span className="text-xs text-purple-400 mt-1 block">0 Violations</span>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-8">
+                    <div className="col-span-2 space-y-3">
+                      <h3 className="font-bold text-sm text-slate-200">Live Bengaluru Dispatch Map (Indiranagar Hub)</h3>
+                      <div id="map-container"></div>
+                    </div>
+
+                    <div className="glass-panel p-6 rounded-2xl border border-slate-800 space-y-4 text-xs">
+                      <h3 className="font-bold text-sm text-amber-400">Trigger Dynamic Event Simulation</h3>
+                      
+                      <div className="space-y-2 text-left">
+                        <label className="text-slate-400 block font-medium">Select Dynamic Road Event:</label>
+                        <select
+                          value={eventType}
+                          onChange={(e) => setEventType(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2.5 text-slate-200 outline-none font-semibold cursor-pointer"
+                        >
+                          <option value="TRAFFIC_AT_STOP">🚦 Traffic bottleneck at specific stop (e.g. going to 3)</option>
+                          <option value="FAILED_DELIVERY">❌ Customer Delivery Failed / Unavailable</option>
+                          <option value="SKIP_STOP">🚫 Cancel / Skip delivery stop (e.g. cancel 4)</option>
+                          <option value="URGENT_HUB_DELIVERY">🚨 Urgent Hub Pickup & Delivery (not with partner)</option>
+                          <option value="NEW_PICKUP">📦 Standard Pickup Insertion</option>
+                        </select>
+                      </div>
+
+                      {/* Target Stop Dropdown */}
+                      {(eventType === 'TRAFFIC_AT_STOP' || eventType === 'FAILED_DELIVERY' || eventType === 'SKIP_STOP') && (
+                        <div className="space-y-2 text-left">
+                          <label className="text-slate-400 block font-medium">Select Target Stop:</label>
+                          <select
+                            value={targetStopId}
+                            onChange={(e) => setTargetStopId(e.target.value)}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-slate-200 outline-none cursor-pointer"
+                          >
+                            {(routes.length > 0 ? routes[0].stops : defaultStops).map(s => (
+                              <option key={s.id} value={s.id}>
+                                Stop #{s.stop_sequence}: {s.location_name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
+                      {eventType === 'TRAFFIC_AT_STOP' && (
+                        <div className="space-y-2 text-left">
+                          <label className="text-slate-400 block font-medium">Traffic Delay Duration (minutes):</label>
+                          <input
+                            type="number"
+                            value={delayMins}
+                            onChange={(e) => setDelayMins(e.target.value)}
+                            className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-1.5 text-slate-200 outline-none font-mono"
+                            min="5"
+                            max="180"
+                          />
+                        </div>
+                      )}
+
+                      {eventType === 'URGENT_HUB_DELIVERY' && (
+                        <div className="bg-brand-500/10 border border-brand-500/20 p-2.5 rounded-xl text-slate-300 leading-normal text-left">
+                          🚨 <strong>Urgent Hub Pickup:</strong> Reroutes the driver back to the depot (Hub) first to collect the parcel, and then delivers it to Ulsoor customer. Google OR-Tools optimizes the path.
+                        </div>
+                      )}
+
+                      <button
+                        onClick={triggerReplan}
+                        disabled={loading}
+                        className="w-full py-3 bg-amber-600 hover:bg-amber-500 text-white rounded-xl font-bold text-xs shadow-lg shadow-amber-600/20 transition-all flex items-center justify-center space-x-2"
+                      >
+                        <span>{loading ? 'Re-optimizing...' : '⚡ Trigger Simulation Event'}</span>
+                      </button>
+
+                      {replanResult && (
+                        <div className="glass-card p-4 rounded-xl border border-amber-500/30 bg-amber-500/5 space-y-2 mt-4 text-left">
+                          <span className="text-[10px] font-mono text-amber-400 font-bold">REPLAN COMPLETED</span>
+                          <p className="text-xs text-slate-200 font-semibold">{replanResult.ai_explanation}</p>
+                          <div className="text-[11px] text-slate-400 pt-2 border-t border-slate-800 flex justify-between">
+                            <span>Distance Delta: <strong>+{replanResult.distance_delta_km} km</strong></span>
+                            <span>Time Delta: <strong>+{replanResult.time_delta_min} min</strong></span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Driver Execution Dashboard: Complete & Completed columns */}
+                  <div className="grid grid-cols-2 gap-8 pt-4 text-xs">
+                    {/* Pending Delivery Stops */}
+                    <div className="glass-panel p-6 rounded-2xl border border-slate-800 space-y-4">
+                      <h3 className="text-sm font-bold text-slate-200 flex items-center justify-between">
+                        <span>Pending Delivery Queue</span>
+                        <span className="text-xs bg-slate-800 text-slate-400 px-2 py-0.5 rounded font-mono">Active</span>
+                      </h3>
+
+                      <div className="space-y-2.5 max-h-[300px] overflow-y-auto pr-1">
+                        {(routes.length > 0 ? routes[0].stops : defaultStops)
+                          .filter(s => !completedStops.includes(s.id))
+                          .map((stop) => (
+                            <div key={stop.id} className="p-3 bg-slate-900/40 border border-slate-800 rounded-xl flex items-center justify-between">
+                              <div className="space-y-1 text-left">
+                                <span className="text-[10px] font-bold text-brand-400">Stop #{stop.stop_sequence}</span>
+                                <h4 className="font-semibold text-slate-200">{stop.location_name}</h4>
+                                <p className="text-[10px] text-slate-500">Package: {stop.package_id} • ETA: {stop.eta || '09:00 AM'}</p>
+                              </div>
+                              <button
+                                onClick={() => setCompletedStops([...completedStops, stop.id])}
+                                className="p-2 bg-emerald-600/10 hover:bg-emerald-600/30 text-emerald-400 rounded-xl border border-emerald-500/20 transition-all"
+                              >
+                                ✓
+                              </button>
+                            </div>
+                          ))}
+                      </div>
+                    </div>
+
+                    {/* Completed Delivery Stops */}
+                    <div className="glass-panel p-6 rounded-2xl border border-slate-800 space-y-4">
+                      <h3 className="text-sm font-bold text-emerald-400 flex items-center justify-between">
+                        <span>Completed Deliveries ({completedStops.length})</span>
+                        <span className="text-xs bg-emerald-500/10 text-emerald-400 px-2 py-0.5 rounded font-mono font-bold">Successful</span>
+                      </h3>
+
+                      <div className="space-y-2.5 max-h-[300px] overflow-y-auto pr-1">
+                        {completedStops.length === 0 ? (
+                          <p className="text-slate-500 text-center py-8">Deliveries completed will appear here.</p>
+                        ) : (
+                          (routes.length > 0 ? routes[0].stops : defaultStops)
+                            .filter(s => completedStops.includes(s.id))
+                            .map((stop) => (
+                              <div key={stop.id} className="p-3 bg-emerald-500/5 border border-emerald-500/20 rounded-xl flex items-center justify-between">
+                                <div className="space-y-1 text-left">
+                                  <span className="text-[10px] font-bold text-emerald-400">Completed Stop</span>
+                                  <h4 className="font-semibold text-slate-300 line-through">{stop.location_name}</h4>
+                                  <p className="text-[10px] text-slate-500">Package: {stop.package_id}</p>
+                                </div>
+                                <button
+                                  onClick={() => setCompletedStops(completedStops.filter(id => id !== stop.id))}
+                                  className="text-[10px] text-slate-400 hover:text-slate-200"
+                                >
+                                  Undo
+                                </button>
+                              </div>
+                            ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Analytics Page */}
+              {page === 'analytics' && (
+                <div className="glass-panel p-8 rounded-2xl border border-slate-800 space-y-6">
+                  <h3 className="text-lg font-bold text-white">Solver Benchmarking & Performance</h3>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-900/80 text-slate-400 uppercase font-mono text-[10px]">
+                        <tr>
+                          <th className="p-3">Solver Algorithm</th>
+                          <th className="p-3">Total Distance</th>
+                          <th className="p-3">Travel Duration</th>
+                          <th className="p-3">Constraint Violations</th>
+                          <th className="p-3">Computation Time</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800">
+                        <tr className="hover:bg-slate-800/40">
+                          <td className="p-3 font-semibold text-slate-300">Naive Greedy Heuristic</td>
+                          <td className="p-3 font-mono text-red-400">42.8 km</td>
+                          <td className="p-3 font-mono text-red-400">98.5 min</td>
+                          <td className="p-3 font-mono text-red-400">4 Violations</td>
+                          <td className="p-3 font-mono text-slate-400">0.012 sec</td>
+                        </tr>
+                        <tr className="hover:bg-slate-800/40">
+                          <td className="p-3 font-semibold text-slate-300">Google OR-Tools VRPTW</td>
+                          <td className="p-3 font-mono text-sky-400">29.3 km</td>
+                          <td className="p-3 font-mono text-emerald-400">66.2 min</td>
+                          <td className="p-3 font-mono text-emerald-400">0 Violations</td>
+                          <td className="p-3 font-mono text-slate-400">0.345 sec</td>
+                        </tr>
+                        <tr className="hover:bg-slate-800/40 bg-sky-500/5 border-l-2 border-sky-500">
+                          <td className="p-3 font-bold text-white">RouteMind Engine</td>
+                          <td className="p-3 font-mono text-sky-400 font-bold">28.4 km</td>
+                          <td className="p-3 font-mono text-emerald-400 font-bold">64.0 min</td>
+                          <td className="p-3 font-mono text-emerald-400 font-bold">0 Violations</td>
+                          <td className="p-3 font-mono text-slate-400">0.182 sec</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Supervisor Approval Page */}
+              {page === 'approval' && (
+                <div className="p-2 space-y-6">
+                  {approvalStatusStr ? (
+                    <div className={`glass-panel p-8 rounded-2xl border text-center space-y-4 ${
+                      approvalStatusStr === 'APPROVED' ? 'border-emerald-500/30 bg-emerald-500/5' : 'border-red-500/30 bg-red-500/5'
+                    }`}>
+                      <h4 className="text-xl font-bold text-white">Route Replan {approvalStatusStr}</h4>
+                      <p className="text-xs text-slate-400">Database updated. Dispatch route synchronized successfully.</p>
+                    </div>
+                  ) : approvals.length === 0 ? (
+                    <div className="glass-panel p-12 rounded-2xl border border-slate-800 text-center space-y-4">
+                      <h4 className="text-lg font-bold text-white">All Route Dispatches Clear</h4>
+                      <p className="text-xs text-slate-400">No pending dynamic route changes are currently awaiting supervisor authorization.</p>
+                    </div>
+                  ) : (
+                    <div className="glass-panel p-8 rounded-2xl border border-slate-800 space-y-6">
+                      <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                        <div>
+                          <span className="text-xs font-mono text-amber-400 bg-amber-500/10 px-2.5 py-1 rounded border border-amber-500/20 font-bold">
+                            PENDING APPROVAL: #{approvals[0].id}
+                          </span>
+                          <h4 className="font-bold text-lg text-slate-100 mt-2">Route #{approvals[0].route_id} - Dynamic Re-Optimization</h4>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-6 text-xs">
+                        <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800">
+                          <span className="text-slate-400 block mb-1">Distance Delta</span>
+                          <span className="text-lg font-bold text-amber-400">{approvals[0].original_distance_km} km → {approvals[0].new_distance_km} km</span>
+                        </div>
+                        <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800">
+                          <span className="text-slate-400 block mb-1">Time Delta</span>
+                          <span className="text-lg font-bold text-amber-400">{approvals[0].original_time_min} min → {approvals[0].new_time_min} min</span>
+                        </div>
+                        <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800">
+                          <span className="text-slate-400 block mb-1">Stops Changed</span>
+                          <span className="text-lg font-bold text-emerald-400">{approvals[0].stops_changed_count} Stops</span>
+                        </div>
+                      </div>
+
+                      <div className="glass-card p-5 rounded-xl border border-brand-500/30 bg-brand-500/5 space-y-2">
+                        <h5 className="font-bold text-xs text-brand-400 uppercase tracking-wider">AI Route Change Explanation</h5>
+                        <p className="text-sm text-slate-200 leading-relaxed">{approvals[0].ai_explanation}</p>
+                      </div>
+
+                      <div className="space-y-4 pt-4 border-t border-slate-800">
+                        <textarea
+                          rows="2"
+                          placeholder="Optional decision note..."
+                          value={approvalReason}
+                          onChange={(e) => setApprovalReason(e.target.value)}
+                          className="w-full bg-slate-900/80 border border-slate-700 rounded-xl p-3 text-xs text-slate-200 focus:outline-none"
+                        />
+                        <div className="flex justify-end space-x-3">
+                          <button
+                            onClick={() => handleApproveAction(approvals[0].id, 'reject')}
+                            className="px-6 py-2.5 bg-red-600/20 text-red-400 border border-red-500/30 rounded-xl text-xs font-semibold"
+                          >
+                            Reject Replan
+                          </button>
+                          <button
+                            onClick={() => handleApproveAction(approvals[0].id, 'approve')}
+                            className="px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold"
+                          >
+                            Approve Replan
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Settings Page */}
+              {page === 'settings' && (
+                <div className="glass-panel p-8 rounded-2xl border border-slate-800 space-y-6">
+                  <h3 className="text-lg font-bold text-white">Indian Logistics Constraints Engine</h3>
+                  <div className="space-y-4 text-xs">
+                    <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex justify-between items-center">
+                      <div>
+                        <h4 className="font-bold text-white">Delivery Time Windows (VRPTW)</h4>
+                        <p className="text-slate-400">Customer slot compliance (e.g. 09:00 - 12:00 PM)</p>
+                      </div>
+                      <span className="text-emerald-400 font-mono font-bold bg-emerald-500/10 px-3 py-1 rounded-full">ACTIVE</span>
+                    </div>
+                    <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex justify-between items-center">
+                      <div>
+                        <h4 className="font-bold text-white">COD Cash Limit Cap</h4>
+                        <p className="text-slate-400">Max ₹50,000 INR cash collection per vehicle shift</p>
+                      </div>
+                      <span className="text-emerald-400 font-mono font-bold bg-emerald-500/10 px-3 py-1 rounded-full">ACTIVE</span>
+                    </div>
+                    <div className="p-4 rounded-xl bg-slate-900/60 border border-slate-800 flex justify-between items-center">
+                      <div>
+                        <h4 className="font-bold text-white">Metro No-Entry Zone Truck Bans</h4>
+                        <p className="text-slate-400">Restricted commercial corridor timings (14:00 - 17:00 PM)</p>
+                      </div>
+                      <span className="text-emerald-400 font-mono font-bold bg-emerald-500/10 px-3 py-1 rounded-full">ACTIVE</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </main>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
